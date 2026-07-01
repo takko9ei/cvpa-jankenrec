@@ -9,6 +9,8 @@ debug.py — 单步调试工具（Step 0 脚手架）
 import cv2
 import numpy as np
 
+import pipeline
+
 
 # Height (px) that every panel is resized to before being placed side by side.
 PANEL_HEIGHT = 480
@@ -70,9 +72,13 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 0: just load a sample image and show it as-is.
+    # Step 1: verify skin_mask on a static sample.
     # (Sample on disk is paper.png, not paper.jpg.)
-    img = cv2.imread("data/paper.png")
+    img = cv2.imread("data/paper.jpg")
     if img is None:
         raise FileNotFoundError("could not read data/paper.png")
-    show(("original", img))
+
+    # return_stages=True gives us both the raw thresholded mask and the
+    # morphology-cleaned mask so we can compare them side by side.
+    raw, clean = pipeline.skin_mask(img, return_stages=True)
+    show(("original", img), ("raw mask", raw), ("clean mask", clean))

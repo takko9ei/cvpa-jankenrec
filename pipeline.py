@@ -20,14 +20,24 @@ import numpy as np
 
 # --- Skin segmentation (YCrCb thresholding) -------------------------------
 # Lower / upper bounds for the Cr and Cb channels used to threshold skin.
-# (Y is usually left wide open; skin clusters tightly in Cr/Cb.)
-CR_MIN = 133          # lower bound of Cr channel
-CR_MAX = 173          # upper bound of Cr channel
-CB_MIN = 77           # lower bound of Cb channel
-CB_MAX = 127          # upper bound of Cb channel
+# (Y luma is left wide open; skin clusters tightly in Cr/Cb regardless of
+# brightness.) TUNE PER REAL CAPTURE: a window too wide leaks background,
+# too narrow drops parts of the hand.
+# NOTE: tightened from the textbook 133-173 / 77-127 box after testing on
+# data/paper.png, whose warm cream wall sits near skin in chroma (wall Cr~135
+# Cb~116, palm Cr~153 Cb~111). Skin here reads as HIGHER Cr + LOWER Cb than
+# the wall, so we raise CR_MIN and lower CB_MAX to reject it. On a background
+# that clear
+# ly differs from skin, these can be loosened back toward defaults.
+CR_MIN = 135      # lower bound of Cr channel (raise -> stricter/redder)
+CR_MAX = 173          # upper bound of Cr channel (lower -> stricter)
+CB_MIN = 77      # lower bound of Cb channel (raise -> stricter)
+CB_MAX = 120          # upper bound of Cb channel (lower -> stricter/less blue)
 
 # --- Morphology (clean up the raw skin mask) ------------------------------
 # Close = fill small holes inside the hand; Open = remove small speckle noise.
+# Bigger kernel = stronger effect (fills/removes larger regions) but blurs
+# the silhouette; too big can merge fingers or eat thin finger tips.
 MORPH_CLOSE_KSIZE = 7   # kernel size for morphological closing (odd number)
 MORPH_OPEN_KSIZE = 5    # kernel size for morphological opening (odd number)
 
@@ -52,7 +62,7 @@ SCISSORS_MAX_FINGERS = 3    # <= this many fingers (and > ROCK_MAX) => Scissors
 # PIPELINE FUNCTIONS — 8 个阶段（当前仅骨架）
 # =============================================================================
 
-def skin_mask(frame):
+def skin_mask(frame, return_stages=False):
     """Stage 1 — Skin segmentation.
 
     Convert the BGR frame to a skin/non-skin binary mask using YCrCb
@@ -60,11 +70,39 @@ def skin_mask(frame):
 
     Args:
         frame: BGR image (H, W, 3) uint8.
+        return_stages: debug flag. When True, also return the pre-cleanup
+            mask so debug.py can compare raw vs. clean side by side. Normal
+            callers (main.py) leave this False and get a single mask.
 
     Returns:
         mask: binary image (H, W) uint8, 255 = skin, 0 = background.
+        If return_stages is True: (raw_mask, clean_mask) tuple instead.
     """
-    raise NotImplementedError
+    # 1. BGR -> YCrCb. Skin tone forms a compact cluster in the Cr/Cb plane,
+    #    which makes it far easier to threshold than in RGB/BGR.
+    ycrcb = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+
+    # 2. Threshold ONLY Cr and Cb. Y (luma/brightness) is left wide open
+    #    (0..255) so lighting changes don't knock skin pixels out of range.
+    #    cv2.inRange needs per-channel bounds; channel order here is Y,Cr,Cb.
+    lower = np.array([0, CR_MIN, CB_MIN], dtype=np.uint8)
+    upper = np.array([255, CR_MAX, CB_MAX], dtype=np.uint8)
+    raw = cv2.inRange(ycrcb, lower, upper)   # 255 = skin, 0 = background
+
+    # 3. Morphological cleanup with elliptical (rounded) kernels so we don't
+    #    carve blocky corners into the hand silhouette.
+    close_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (MORPH_CLOSE_KSIZE, MORPH_CLOSE_KSIZE))
+    open_kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (MORPH_OPEN_KSIZE, MORPH_OPEN_KSIZE))
+    # Close first: dilate-then-erode fills small black holes inside the hand.
+    clean = cv2.morphologyEx(raw, cv2.MORPH_CLOSE, close_kernel)
+    # Then open: erode-then-dilate removes small white speckles in background.
+    clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN, open_kernel)
+
+    if return_stages:
+        return raw, clean
+    return clean
 
 
 def split_hands(mask):
