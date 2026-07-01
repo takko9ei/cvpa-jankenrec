@@ -104,31 +104,29 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 3: verify palm_center on a single-hand sample.
-    # (Sample on disk is paper.jpg.)
-    img = cv2.imread("data/paper.jpg")
+    # Step 4: verify crop_forearm on a hand that HAS a real forearm.
+    img = cv2.imread("data/paper_with_forearm.jpg")
     if img is None:
-        raise FileNotFoundError("could not read data/paper.jpg")
+        raise FileNotFoundError("could not read data/paper_with_forearm.jpg")
 
     clean = pipeline.skin_mask(img)          # Step 1 mask
     hands = pipeline.split_hands(clean)      # Step 2: one mask per hand
     if not hands:
-        raise RuntimeError("no hand found in paper.jpg")
+        raise RuntimeError("no hand found in paper_with_forearm.jpg")
     hand = hands[0]
+    (cx, cy), r = pipeline.palm_center(hand)  # Step 3
 
-    center, radius = pipeline.palm_center(hand)   # Step 3
-    print(f"palm center = {center}, radius = {radius:.1f}")
+    cropped = pipeline.crop_forearm(hand, (cx, cy), r)  # Step 4
+    print("crop_forearm keeps %.0f%% (forearm removed)"
+          % (100 * np.count_nonzero(cropped) / np.count_nonzero(hand)))
 
-    # Draw the inscribed circle (radius) and the palm center dot on a copy
-    # of the original.
-    annotated = img.copy()
-    cv2.circle(annotated, center, int(radius), (0, 255, 0), 6)   # inscribed circle
-    cv2.circle(annotated, center, 15, (0, 0, 255), -1)           # center dot
+    # 'before' = hand mask with palm center, inscribed circle, and the magenta
+    # cut line; everything below that line is what crop_forearm removes.
+    before = cv2.cvtColor(hand, cv2.COLOR_GRAY2BGR)
+    cut_y = int(cy + r * pipeline.CUT_BELOW_SCALE)
+    cv2.circle(before, (cx, cy), int(r), (0, 255, 0), 5)   # inscribed circle
+    cv2.circle(before, (cx, cy), 15, (0, 0, 255), -1)      # palm center
+    cv2.line(before, (0, cut_y), (before.shape[1], cut_y), (255, 0, 255), 6)
 
-    # Distance transform as a grayscale image (brightest = deepest inside the
-    # hand = the palm center). Recomputed here purely for visualization.
-    dist = cv2.distanceTransform(hand, cv2.DIST_L2, 5)
-    dist_vis = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-
-    show(("original", img), ("palm center", annotated),
-         ("distance transform", dist_vis))
+    show(("original", img), ("before (magenta = cut line)", before),
+         ("after crop_forearm", cropped))

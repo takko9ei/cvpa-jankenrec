@@ -51,6 +51,13 @@ MORPH_OPEN_KSIZE = 5    # kernel size for morphological opening (odd number)
 HAND_AREA_MIN = 50000     # ignore blobs smaller than this (noise / desk strips)
 HAND_AREA_MAX = 1300000   # ignore blobs larger than this (background bleed)
 
+# --- Forearm cropping -----------------------------------------------------
+# Frontal hand assumption: fingers point up, wrist/forearm points down. Any
+# hand pixel more than this many palm-radii BELOW the palm center is treated
+# as forearm and blacked out. Larger = keep more (safer for the palm heel),
+# smaller = cut more aggressively (risk clipping the palm).
+CUT_BELOW_SCALE = 1.5
+
 # --- Finger counting: concentric ring sampling ----------------------------
 # We sample circles at these multiples of the palm inscribed-circle radius.
 # Each factor > 1.0 pushes the ring outward past the palm into the fingers.
@@ -194,7 +201,15 @@ def crop_forearm(hand_mask, center_xy, radius):
     Returns:
         hand_mask: binary mask (H, W) uint8 with the forearm removed.
     """
-    raise NotImplementedError
+    # Fingers point up, the arm points down (frontal-hand assumption). So every
+    # hand pixel far enough BELOW the palm center is wrist/forearm. Only the
+    # center's y matters for a horizontal cut line; everything from this row
+    # downward gets blacked out.
+    _, cy = center_xy
+    cut_y = int(cy + radius * CUT_BELOW_SCALE)
+    result = hand_mask.copy()
+    result[cut_y:, :] = 0     # rows below the cut line -> background (0)
+    return result
 
 
 def count_fingers(hand_mask, center_xy, radius):
