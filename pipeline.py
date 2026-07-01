@@ -32,7 +32,7 @@ import numpy as np
 CR_MIN = 135      # lower bound of Cr channel (raise -> stricter/redder)
 CR_MAX = 173          # upper bound of Cr channel (lower -> stricter)
 CB_MIN = 77      # lower bound of Cb channel (raise -> stricter)
-CB_MAX = 120          # upper bound of Cb channel (lower -> stricter/less blue)
+CB_MAX = 130          # upper bound of Cb channel (lower -> stricter/less blue)
 
 # --- Morphology (clean up the raw skin mask) ------------------------------
 # Close = fill small holes inside the hand; Open = remove small speckle noise.
@@ -50,6 +50,22 @@ MORPH_OPEN_KSIZE = 5    # kernel size for morphological opening (odd number)
 # frame is ~10x smaller, so lower BOTH by roughly that factor for live use.
 HAND_AREA_MIN = 50000     # ignore blobs smaller than this (noise / desk strips)
 HAND_AREA_MAX = 1300000   # ignore blobs larger than this (background bleed)
+
+# --- Palm center search band (fist-vs-forearm fix) ------------------------
+# palm_center() picks the deepest interior point via distance transform. For an
+# OPEN hand the palm is the widest interior region, so the transform peaks there.
+# But a closed FIST is nearly as thick as the forearm below it, so the global
+# maximum can slide DOWN onto the wrist and mislocate the palm (which then breaks
+# crop_forearm). Fix with the frontal-hand assumption (fingers/fist UP, forearm
+# DOWN): only search inside a horizontal band that starts at the hand's TOPMOST
+# white pixel and runs down this many times the hand's bounding-box WIDTH.
+# Because it scales with hand width, the band self-adjusts: an OPEN hand (spread
+# fingers -> wider bbox) gets a deeper band to reach its lower palm, a FIST
+# (narrow bbox) gets a shallow band that stops before the forearm widens.
+# 0.7 is a fairly tight window on the test images: RAISE it and a fist's center
+# can drop onto the wrist; LOWER it and an open hand's center rides up toward the
+# finger bases. Retune if hands sit very differently in the frame.
+TOP_SEARCH_SCALE = 0.7
 
 # --- Forearm cropping -----------------------------------------------------
 # Frontal hand assumption: fingers point up, wrist/forearm points down. Any
@@ -163,6 +179,11 @@ def palm_center(hand_mask):
     boundary). That point is the palm center; its distance to the boundary
     is the radius of the largest circle that fits inside the palm.
 
+    The search is restricted to an upper band of the hand (see
+    TOP_SEARCH_SCALE): a closed fist is nearly as thick as the forearm, so an
+    unconstrained maximum can slide down onto the wrist. Frontal-hand
+    assumption: fingers/fist point up, forearm points down.
+
     Args:
         hand_mask: binary mask (H, W) uint8 of a single hand.
 
@@ -175,13 +196,29 @@ def palm_center(hand_mask):
     #    DIST_L2 = true Euclidean distance; 5 = the distance-mask size.
     dist = cv2.distanceTransform(hand_mask, cv2.DIST_L2, 5)
 
-    # 2. The pixel with the LARGEST distance-to-edge is the point sitting
-    #    deepest inside the hand -> the palm center. minMaxLoc returns the min
-    #    value, max value, and their (x, y) locations; we want the max.
+    # 2. Constrain the palm search to the UPPER band of the hand. Find the
+    #    topmost white pixel (smallest y) and the hand's bounding-box width;
+    #    the band runs from top_y down TOP_SEARCH_SCALE * width. This keeps the
+    #    center on the palm/fist instead of letting it slide onto the forearm
+    #    (a fist is nearly as thick as the wrist, so the raw max can drop down).
+    ys, xs = np.where(hand_mask > 0)
+    top_y = int(ys.min())                     # highest white pixel (smallest y)
+    hand_w = int(xs.max() - xs.min() + 1)     # hand bounding-box width (px)
+    band_bottom = top_y + int(TOP_SEARCH_SCALE * hand_w)
+
+    # 3. Blank out the distance transform BELOW the band so minMaxLoc can only
+    #    pick a candidate inside [top_y, band_bottom). A band_bottom past the
+    #    image edge just leaves the whole hand in play (empty slice, no-op).
+    dist[band_bottom:, :] = 0
+
+    # 4. Within the band, the pixel with the LARGEST distance-to-edge is the
+    #    point sitting deepest inside the palm/fist -> the palm center.
+    #    minMaxLoc returns the min value, max value, and their (x, y)
+    #    locations; we want the max.
     _, max_val, _, max_loc = cv2.minMaxLoc(dist)
 
-    # 3. That max distance IS the radius of the biggest circle that fits fully
-    #    inside the hand (the palm's inscribed circle).
+    # 5. That max distance IS the radius of the biggest circle that fits fully
+    #    inside the hand at that point (the palm's inscribed circle).
     center_xy = (int(max_loc[0]), int(max_loc[1]))
     radius = float(max_val)
     return center_xy, radius

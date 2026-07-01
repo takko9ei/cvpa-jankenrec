@@ -104,29 +104,47 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 4: verify crop_forearm on a hand that HAS a real forearm.
-    img = cv2.imread("data/paper_with_forearm.jpg")
-    if img is None:
-        raise FileNotFoundError("could not read data/paper_with_forearm.jpg")
+    # Step 3 (re-verify after the fist-vs-forearm fix): the palm center must
+    # land on the palm/fist center for ALL of rock / scissors / paper, and must
+    # NOT slide down onto the wrist. The three gesture photos share one capture
+    # setup (data/*_s5.png; "stone" == rock).
+    TESTS = ["data/stone_s5.png", "data/scissors_s5.png", "data/paper_s5.png"]
 
-    clean = pipeline.skin_mask(img)          # Step 1 mask
-    hands = pipeline.split_hands(clean)      # Step 2: one mask per hand
-    if not hands:
-        raise RuntimeError("no hand found in paper_with_forearm.jpg")
-    hand = hands[0]
-    (cx, cy), r = pipeline.palm_center(hand)  # Step 3
+    panels = []
+    for path in TESTS:
+        img = cv2.imread(path)
+        if img is None:
+            raise FileNotFoundError("could not read " + path)
 
-    cropped = pipeline.crop_forearm(hand, (cx, cy), r)  # Step 4
-    print("crop_forearm keeps %.0f%% (forearm removed)"
-          % (100 * np.count_nonzero(cropped) / np.count_nonzero(hand)))
+        clean = pipeline.skin_mask(img)          # Step 1 mask
+        hands = pipeline.split_hands(clean)      # Step 2: one mask per hand
+        if not hands:
+            raise RuntimeError("no hand found in " + path)
+        # If several blobs survive, judge the biggest (the actual hand).
+        hand = max(hands, key=lambda m: np.count_nonzero(m))
+        (cx, cy), r = pipeline.palm_center(hand)  # Step 3 (band-constrained)
 
-    # 'before' = hand mask with palm center, inscribed circle, and the magenta
-    # cut line; everything below that line is what crop_forearm removes.
-    before = cv2.cvtColor(hand, cv2.COLOR_GRAY2BGR)
-    cut_y = int(cy + r * pipeline.CUT_BELOW_SCALE)
-    cv2.circle(before, (cx, cy), int(r), (0, 255, 0), 5)   # inscribed circle
-    cv2.circle(before, (cx, cy), 15, (0, 0, 255), -1)      # palm center
-    cv2.line(before, (0, cut_y), (before.shape[1], cut_y), (255, 0, 255), 6)
+        # Recompute the search band the SAME way palm_center does, so we can
+        # draw the cyan band-bottom line and see what constrained the search.
+        ys, xs = np.where(hand > 0)
+        top_y = int(ys.min())
+        hand_w = int(xs.max() - xs.min() + 1)
+        band_bottom = top_y + int(pipeline.TOP_SEARCH_SCALE * hand_w)
 
-    show(("original", img), ("before (magenta = cut line)", before),
-         ("after crop_forearm", cropped))
+        # Annotate the ORIGINAL photo so we can judge by eye whether the red
+        # center dot sits on the palm/fist and not on the forearm.
+        vis = img.copy()
+        cv2.line(vis, (0, top_y), (vis.shape[1], top_y), (0, 255, 255), 4)      # top_y (yellow)
+        cv2.line(vis, (0, band_bottom), (vis.shape[1], band_bottom),
+                 (255, 255, 0), 4)                                              # band bottom (cyan)
+        cv2.circle(vis, (cx, cy), int(r), (0, 255, 0), 5)   # inscribed circle
+        cv2.circle(vis, (cx, cy), 18, (0, 0, 255), -1)      # palm center dot
+
+        name = path.split("/")[-1]
+        print("%-16s center=(%d,%d) r=%.0f  band=[%d,%d]"
+              % (name, cx, cy, r, top_y, band_bottom))
+        panels.append(("%s  c=(%d,%d) r=%.0f" % (name, cx, cy, r), vis))
+
+    # Yellow = top_y, Cyan = band bottom (search limit), Green = inscribed
+    # circle, Red = palm center.
+    show(*panels)
