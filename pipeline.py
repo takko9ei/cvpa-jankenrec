@@ -42,9 +42,14 @@ MORPH_CLOSE_KSIZE = 7   # kernel size for morphological closing (odd number)
 MORPH_OPEN_KSIZE = 5    # kernel size for morphological opening (odd number)
 
 # --- Hand region area filter (in pixels) ----------------------------------
-# Connected components smaller/larger than this are not treated as a hand.
-HAND_AREA_MIN = 3000     # ignore blobs smaller than this (noise)
-HAND_AREA_MAX = 200000   # ignore blobs larger than this (background bleed)
+# split_hands() keeps only connected components whose pixel area is in
+# [HAND_AREA_MIN, HAND_AREA_MAX]; smaller = noise, larger = background bleed.
+# TUNE PER REAL CAPTURE -- these are ABSOLUTE pixel counts, so they scale with
+# resolution. Values below are sized for the high-res debug photos in data/
+# (~2.5-2.9 M px total, where one hand is ~0.6-1.0 M px). A 640x480 webcam
+# frame is ~10x smaller, so lower BOTH by roughly that factor for live use.
+HAND_AREA_MIN = 50000     # ignore blobs smaller than this (noise / desk strips)
+HAND_AREA_MAX = 1300000   # ignore blobs larger than this (background bleed)
 
 # --- Finger counting: concentric ring sampling ----------------------------
 # We sample circles at these multiples of the palm inscribed-circle radius.
@@ -119,7 +124,29 @@ def split_hands(mask):
         list[hand_mask]: list of binary masks (H, W) uint8, one per hand
         (0, 1, or 2 entries in practice).
     """
-    raise NotImplementedError
+    # 1. Label 8-connected blobs. connectedComponentsWithStats returns four
+    #    things: the label count, the per-pixel label image, a per-label stats
+    #    table (bbox + area), and per-label centroids. We only need the count,
+    #    the label image, and the area column here.
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        mask, connectivity=8)
+
+    hands = []
+    # 2. Label 0 is ALWAYS the background, so start from 1.
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        # 3. Keep only blobs whose area looks like a hand; drop noise (too
+        #    small) and background bleed (too large).
+        if area < HAND_AREA_MIN or area > HAND_AREA_MAX:
+            continue
+        # 4. Build a fresh binary mask holding ONLY this component: pixels whose
+        #    label == i become 255, everything else 0. No morphology here --
+        #    cleanup already happened in skin_mask(); this stage only splits.
+        hand_mask = np.uint8(labels == i) * 255
+        hands.append(hand_mask)
+
+    # 5. len(hands) is the number of hands found -- not assumed to be fixed.
+    return hands
 
 
 def palm_center(hand_mask):

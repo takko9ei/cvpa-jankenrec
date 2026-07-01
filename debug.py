@@ -15,11 +15,23 @@ import pipeline
 # Height (px) that every panel is resized to before being placed side by side.
 PANEL_HEIGHT = 480
 
+# Max on-screen size of the combined window. The whole grid is shrunk to fit
+# inside this box (never enlarged), so wide multi-panel views stay visible.
+MAX_WINDOW_W = 1600
+MAX_WINDOW_H = 850
+
+# How many panels per row. Wide images squished into one long row become
+# unreadable, so we wrap them into a grid instead.
+PANELS_PER_ROW = 2
+
 # Style for the title text drawn on top of each panel.
 TITLE_FONT = cv2.FONT_HERSHEY_SIMPLEX
 TITLE_SCALE = 0.7
 TITLE_COLOR = (0, 255, 0)   # BGR green
 TITLE_THICK = 2
+
+# Distinct pure BGR colors used to paint each detected hand in the overlay.
+HAND_COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]  # R,G,B,Y
 
 
 def _to_bgr(img):
@@ -64,21 +76,61 @@ def show(*pairs):
                     TITLE_COLOR, TITLE_THICK, cv2.LINE_AA)
         panels.append(panel)
 
-    # Stack all panels horizontally into a single strip and show it.
-    strip = cv2.hconcat(panels)
-    cv2.imshow("debug", strip)
+    # Lay panels out in a grid (PANELS_PER_ROW per row) instead of one long
+    # row, so wide images don't get squished to a thin unreadable strip.
+    rows = []
+    for r in range(0, len(panels), PANELS_PER_ROW):
+        rows.append(cv2.hconcat(panels[r:r + PANELS_PER_ROW]))
+    # Pad shorter rows on the right (black) so every row has the same width.
+    grid_w = max(row.shape[1] for row in rows)
+    rows = [cv2.copyMakeBorder(row, 0, 0, 0, grid_w - row.shape[1],
+                               cv2.BORDER_CONSTANT, value=(0, 0, 0))
+            for row in rows]
+    grid = cv2.vconcat(rows)
+
+    # Shrink the whole grid so it fits inside the on-screen window box (only
+    # ever scale down), otherwise big debug photos run off the screen.
+    gh, gw = grid.shape[:2]
+    fit = min(1.0, MAX_WINDOW_W / gw, MAX_WINDOW_H / gh)
+    if fit < 1.0:
+        grid = cv2.resize(grid, (int(gw * fit), int(gh * fit)))
+
+    # WINDOW_NORMAL + resizeWindow makes the window match the fitted image.
+    cv2.namedWindow("debug", cv2.WINDOW_NORMAL)
+    cv2.imshow("debug", grid)
+    cv2.resizeWindow("debug", grid.shape[1], grid.shape[0])
     cv2.waitKey(0)
     cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    # Step 1: verify skin_mask on a static sample.
-    # (Sample on disk is paper.png, not paper.jpg.)
-    img = cv2.imread("data/paper.jpg")
+    # Step 2: verify split_hands on a two-hand sample.
+    # (Sample on disk is two_hands.png, not .jpg.)
+    img = cv2.imread("data/two_hands.png")
     if img is None:
-        raise FileNotFoundError("could not read data/paper.png")
+        raise FileNotFoundError("could not read data/two_hands.png")
 
-    # return_stages=True gives us both the raw thresholded mask and the
-    # morphology-cleaned mask so we can compare them side by side.
-    raw, clean = pipeline.skin_mask(img, return_stages=True)
-    show(("original", img), ("raw mask", raw), ("clean mask", clean))
+    clean = pipeline.skin_mask(img)          # Step 1 mask
+    hands = pipeline.split_hands(clean)      # Step 2: one binary mask per hand
+    print(f"split_hands found {len(hands)} hand(s)")
+
+    # Paint each hand a solid, OPAQUE color (direct overwrite, not blended) on
+    # a copy of the original, then draw its bounding box + index number.
+    overlay = img.copy()
+    for idx, hand in enumerate(hands):
+        color = HAND_COLORS[idx % len(HAND_COLORS)]
+        overlay[hand > 0] = color                       # solid fill
+        x, y, w, h = cv2.boundingRect(hand)             # bbox from the mask
+        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 6)
+        # Draw the index in BLACK, centered inside the bounding box.
+        label = f"#{idx}"
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 3.0, 8)
+        org = (x + w // 2 - tw // 2, y + h // 2 + th // 2)
+        cv2.putText(overlay, label, org,
+                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 0, 0), 8, cv2.LINE_AA)
+
+    # First hand's raw black/white mask (empty if none found), shown next to
+    # the Step 1 clean mask so we can compare fingertips.
+    hand0 = hands[0] if hands else np.zeros_like(clean)
+    show(("original", img), ("hands overlay", overlay),
+         ("hand 0 mask", hand0), ("clean mask", clean))
