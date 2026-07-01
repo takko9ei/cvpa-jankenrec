@@ -163,7 +163,21 @@ def palm_center(hand_mask):
         (center_xy, radius): center_xy is an (x, y) int tuple, radius is a
         float (pixels).
     """
-    raise NotImplementedError
+    # 1. Distance transform: replace every foreground (hand) pixel with its
+    #    distance to the NEAREST background pixel, i.e. to the hand's edge.
+    #    DIST_L2 = true Euclidean distance; 5 = the distance-mask size.
+    dist = cv2.distanceTransform(hand_mask, cv2.DIST_L2, 5)
+
+    # 2. The pixel with the LARGEST distance-to-edge is the point sitting
+    #    deepest inside the hand -> the palm center. minMaxLoc returns the min
+    #    value, max value, and their (x, y) locations; we want the max.
+    _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+
+    # 3. That max distance IS the radius of the biggest circle that fits fully
+    #    inside the hand (the palm's inscribed circle).
+    center_xy = (int(max_loc[0]), int(max_loc[1]))
+    radius = float(max_val)
+    return center_xy, radius
 
 
 def crop_forearm(hand_mask, center_xy, radius):

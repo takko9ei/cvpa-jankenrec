@@ -104,30 +104,31 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 2: verify split_hands on a two-hand sample.
-    # (Sample on disk is two_hands.png, not .jpg.)
-    img = cv2.imread("data/two_hands.png")
+    # Step 3: verify palm_center on a single-hand sample.
+    # (Sample on disk is paper.jpg.)
+    img = cv2.imread("data/paper.jpg")
     if img is None:
-        raise FileNotFoundError("could not read data/two_hands.png")
+        raise FileNotFoundError("could not read data/paper.jpg")
 
     clean = pipeline.skin_mask(img)          # Step 1 mask
-    hands = pipeline.split_hands(clean)      # Step 2: one binary mask per hand
-    print(f"split_hands found {len(hands)} hand(s)")
+    hands = pipeline.split_hands(clean)      # Step 2: one mask per hand
+    if not hands:
+        raise RuntimeError("no hand found in paper.jpg")
+    hand = hands[0]
 
-    # Paint each hand a solid, OPAQUE color (direct overwrite, not blended) on
-    # a copy of the original, then draw its bounding box + index number.
-    overlay = img.copy()
-    for idx, hand in enumerate(hands):
-        color = HAND_COLORS[idx % len(HAND_COLORS)]
-        overlay[hand > 0] = color                       # solid fill
-        x, y, w, h = cv2.boundingRect(hand)             # bbox from the mask
-        cv2.rectangle(overlay, (x, y), (x + w, y + h), color, 6)
-        # Draw the index in BLACK, centered inside the bounding box.
-        label = f"#{idx}"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 3.0, 8)
-        org = (x + w // 2 - tw // 2, y + h // 2 + th // 2)
-        cv2.putText(overlay, label, org,
-                    cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 0, 0), 8, cv2.LINE_AA)
+    center, radius = pipeline.palm_center(hand)   # Step 3
+    print(f"palm center = {center}, radius = {radius:.1f}")
 
-    # Show, top to bottom: original, the Step 1 clean mask, the hand overlay.
-    show(("original", img), ("clean mask", clean), ("hands overlay", overlay))
+    # Draw the inscribed circle (radius) and the palm center dot on a copy
+    # of the original.
+    annotated = img.copy()
+    cv2.circle(annotated, center, int(radius), (0, 255, 0), 6)   # inscribed circle
+    cv2.circle(annotated, center, 15, (0, 0, 255), -1)           # center dot
+
+    # Distance transform as a grayscale image (brightest = deepest inside the
+    # hand = the palm center). Recomputed here purely for visualization.
+    dist = cv2.distanceTransform(hand, cv2.DIST_L2, 5)
+    dist_vis = cv2.normalize(dist, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+    show(("original", img), ("palm center", annotated),
+         ("distance transform", dist_vis))
