@@ -407,7 +407,16 @@ def classify(finger_count):
     Returns:
         str: one of "Rock", "Scissors", "Paper".
     """
-    raise NotImplementedError
+    # Thresholds live in the constants block (ROCK_MAX_FINGERS = 1,
+    # SCISSORS_MAX_FINGERS = 3). Boundaries: 1 -> Rock, 3 -> Scissors, 4 ->
+    # Paper. A closed fist reads 0-1 fingers (Rock); two/three extended fingers
+    # are Scissors; a fully open hand is Paper.
+    if finger_count <= ROCK_MAX_FINGERS:
+        return "Rock"
+    elif finger_count <= SCISSORS_MAX_FINGERS:
+        return "Scissors"
+    else:
+        return "Paper"
 
 
 def judge(shapes):

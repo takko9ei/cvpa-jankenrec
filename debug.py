@@ -136,10 +136,11 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 5: verify count_fingers on rock / scissors / paper. For each hand we
-    # draw every concentric ring in its own color and paint the sample points
-    # that fell INSIDE the hand, so each extended finger shows up as a colored
-    # arc. Console prints the per-ring segment counts and the final mode.
+    # Step 6: run the whole single-hand subchain end to end on rock / scissors /
+    # paper — skin_mask -> split_hands -> palm_center -> crop_forearm ->
+    # count_fingers -> classify — and print each hand's finger count and final
+    # gesture name. The concentric rings are still drawn (colored dots = kept
+    # finger arcs, gray = rejected) so the count stays inspectable.
     TESTS = ["data/stone_s5.png", "data/scissors_s5.png", "data/paper_s5.png"]
     # One distinct BGR color per ring (RING_RADIUS_COEFFS order): red, orange, yellow,
     # green, blue, magenta -- extend if RING_RADIUS_COEFFS grows.
@@ -163,6 +164,7 @@ if __name__ == "__main__":
         # visualize EXACTLY what count_fingers sampled, plus the final answer.
         counts, seqs = pipeline._count_fingers_rings(cropped, (cx, cy), r)
         fingers = pipeline.count_fingers(cropped, (cx, cy), r)
+        gesture = pipeline.classify(fingers)                    # Step 6
 
         # Draw the rings + inside-hand samples on the original photo.
         vis = img.copy()
@@ -186,8 +188,9 @@ if __name__ == "__main__":
         cv2.circle(vis, (cx, cy), 16, (255, 255, 255), -1)     # palm center
 
         name = path.split("/")[-1]
-        print("%-16s per-ring=%s  -> fingers=%d" % (name, counts, fingers))
-        title = "%s rings=%s fingers=%d" % (name, counts, fingers)
+        print("%-16s per-ring=%s  -> fingers=%d  -> %s"
+              % (name, counts, fingers, gesture))
+        title = "%s  fingers=%d  %s" % (name, fingers, gesture)
         cv2.putText(vis, title, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5,
                     (0, 255, 0), 4, cv2.LINE_AA)
         panels.append((name, vis))
