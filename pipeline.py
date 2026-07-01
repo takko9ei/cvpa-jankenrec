@@ -75,9 +75,34 @@ TOP_SEARCH_SCALE = 0.7
 CUT_BELOW_SCALE = 1.2
 
 # --- Finger counting: concentric ring sampling ----------------------------
-# We sample circles at these multiples of the palm inscribed-circle radius.
-# Each factor > 1.0 pushes the ring outward past the palm into the fingers.
-RING_RADIUS_COEFFS = [1.4, 1.7, 2.0, 2.3]
+# count_fingers() samples concentric rings at these multiples of the palm
+# inscribed-circle radius. Each scale > 1.0 pushes the ring OUTWARD past the
+# palm so it crosses the extended fingers. We sample SEVERAL rings and take the
+# MODE of their per-ring finger counts, so a single badly-placed ring can't
+# decide the result: too small (< ~1.2) and it still sits inside the palm;
+# too big (> ~2.3) and it can shoot past short fingertips. Add/shift scales if
+# fingers of very different lengths get missed.
+RING_RADIUS_COEFFS = [1.7, 1.9, 2.1, 2.3, 2.5]
+
+# Number of points sampled evenly around EACH ring (360 = one per ~1 degree).
+# More points = finer angular resolution (less chance of skipping a thin finger
+# or a narrow gap between fingers) but a little slower. The sampled 0/1 sequence
+# is treated as CIRCULAR: index 359 wraps back to index 0.
+RING_NUM_SAMPLES = 360
+
+# Finger-width gate (in DEGREES of arc). Every extended finger crosses a ring as
+# one contiguous skin arc, but so do non-fingers: sampling noise makes tiny
+# arcs, and a closed FIST (or the palm heel) makes WIDE arcs because the ring
+# runs along its rounded edge for a long angular span. A real finger is a thin
+# protrusion, so its arc width is bounded. We therefore only count an arc as a
+# finger when its angular width is within [MIN, MAX]. Measured on the test set:
+# finger arcs span ~9-35 deg, fist/palm bulk ~43-82 deg, noise <7 deg -- so this
+# band cleanly separates them. Because it is measured in DEGREES it is
+# scale-invariant (works for big and small hands alike). RAISE MAX if long/thick
+# fingers get dropped; LOWER it if a fist still leaks arcs; RAISE MIN to kill
+# more speckle.
+FINGER_ARC_MIN_DEG = 8
+FINGER_ARC_MAX_DEG = 40
 
 # --- Classification thresholds (finger count -> gesture) ------------------
 # 0-1 -> Rock, 2-3 -> Scissors, >=4 -> Paper
@@ -252,10 +277,14 @@ def crop_forearm(hand_mask, center_xy, radius):
 def count_fingers(hand_mask, center_xy, radius):
     """Stage 5 — Count extended fingers via concentric-ring sampling.
 
-    Sample circles around the palm center at RING_RADIUS_COEFFS multiples of
-    the palm radius. On each ring, count how many separate skin arcs it
-    crosses (each extended finger pierces the ring once). Aggregate the rings
-    into a single finger count. Must be hand-written geometry — no
+    Sample circles around the palm center at RING_RADIUS_COEFFS multiples of the palm
+    radius. On each ring, walk the circle once and record inside-hand (1) vs
+    background (0) at RING_NUM_SAMPLES points. Every extended finger shows up as
+    one contiguous arc of 1s, so counting those arcs (0->1 rising edges) on that
+    (circular) sequence counts the fingers the ring crosses — but only arcs of
+    finger-like width are kept, so a closed fist's wide edge-arcs and sampling
+    noise don't inflate the count (see _count_ring_arcs). Take the MODE of the
+    per-ring counts as the answer. Hand-written geometry only — no
     cv2.convexityDefects.
 
     Args:
@@ -264,9 +293,106 @@ def count_fingers(hand_mask, center_xy, radius):
         radius: palm inscribed-circle radius.
 
     Returns:
-        int: number of extended fingers.
+        int: number of extended fingers. (debug.py calls the shared helper
+        _count_fingers_rings directly to also get the per-ring detail.)
     """
-    raise NotImplementedError
+    counts, _ = _count_fingers_rings(hand_mask, center_xy, radius)
+
+    # Aggregate the per-ring counts into one number. The MODE (most frequent
+    # value) is robust: rings that land badly (still inside the palm -> 0, or
+    # past the fingertips -> 0) are outvoted by the rings that sit across the
+    # fingers. If two values tie for most-frequent, fall back to the rounded
+    # median of the raw counts (a safe middle value).
+    if not counts:
+        return 0
+    values, freqs = np.unique(counts, return_counts=True)
+    top = freqs.max()
+    modes = values[freqs == top]
+    if len(modes) == 1:
+        return int(modes[0])
+    return int(np.median(counts))
+
+
+def _count_fingers_rings(hand_mask, center_xy, radius):
+    """Shared core for count_fingers: return (per_ring_counts, per_ring_seqs).
+
+    per_ring_counts[i] is the finger count for RING_RADIUS_COEFFS[i]; per_ring_seqs[i]
+    is that ring's raw 0/1 circular sequence (kept so debug.py can visualize
+    exactly what was sampled). Factored out so the live path and the debug path
+    sample identically.
+    """
+    cx, cy = center_xy
+    h, w = hand_mask.shape[:2]
+
+    # One angle per sample, evenly spaced over the full circle. endpoint=False
+    # so we DON'T sample 360 deg (a duplicate of 0 deg); the wrap is handled by
+    # treating the sequence as circular below.
+    angles = np.linspace(0.0, 2.0 * np.pi, RING_NUM_SAMPLES, endpoint=False)
+    cos_a, sin_a = np.cos(angles), np.sin(angles)
+
+    counts, seqs = [], []
+    for scale in RING_RADIUS_COEFFS:
+        ring_r = scale * radius
+        # Pixel coordinates of the sample points around this ring.
+        xs = np.round(cx + ring_r * cos_a).astype(int)
+        ys = np.round(cy + ring_r * sin_a).astype(int)
+
+        # Look up the mask at each point. Points that fall OUTSIDE the image are
+        # treated as background (0) so the ring can safely poke past the frame.
+        seq = np.zeros(RING_NUM_SAMPLES, dtype=np.uint8)
+        on = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        seq[on] = (hand_mask[ys[on], xs[on]] > 0).astype(np.uint8)
+
+        # Turn the circular 0/1 sequence into a finger count: one arc (run of
+        # 1s) per finger, keeping only finger-width arcs (see _count_ring_arcs).
+        counts.append(_count_ring_arcs(seq))
+        seqs.append(seq)
+
+    return counts, seqs
+
+
+def _count_ring_arcs(seq):
+    """Count finger-width skin arcs on one ring's circular 0/1 sequence.
+
+    Each run of consecutive 1s is one skin arc the ring crossed (its start is a
+    0->1 rising edge). We keep only arcs whose angular width lies in
+    [FINGER_ARC_MIN_DEG, FINGER_ARC_MAX_DEG]: narrower ones are sampling noise,
+    wider ones are palm/fist bulk, neither is an extended finger.
+
+    Args:
+        seq: (RING_NUM_SAMPLES,) uint8 array of 0/1 around the ring. The array
+            is CIRCULAR — index n-1 is adjacent to index 0.
+
+    Returns:
+        int: number of finger-width arcs.
+    """
+    n = len(seq)
+    min_len = FINGER_ARC_MIN_DEG / 360.0 * n   # arc-width band, in samples
+    max_len = FINGER_ARC_MAX_DEG / 360.0 * n
+    if not seq.any():
+        return 0    # ring entirely in background (radius overshot the hand)
+    if seq.all():
+        return 0    # ring entirely inside the hand (still one big 360 deg arc)
+
+    # Rotate so the sequence STARTS on a background (0) sample. After this no run
+    # of 1s straddles the wrap seam, so a single left-to-right scan sees every
+    # arc exactly once — this is how the circular first/last connection is
+    # handled without double-counting or missing the arc crossing 0 deg.
+    shift = int(np.flatnonzero(seq == 0)[0])
+    rolled = np.roll(seq, -shift)
+
+    fingers = 0
+    run = 0                       # length of the current run of 1s
+    for v in rolled:
+        if v:
+            run += 1
+        elif run:                 # a run just ended -> test its width
+            if min_len <= run <= max_len:
+                fingers += 1
+            run = 0
+    if run and min_len <= run <= max_len:   # trailing run ending at the array end
+        fingers += 1
+    return fingers
 
 
 def classify(finger_count):

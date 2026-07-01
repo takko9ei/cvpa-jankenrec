@@ -56,6 +56,38 @@ def _resize_to_height(img, height):
     return cv2.resize(img, (new_w, height))
 
 
+def _kept_arc_samples(seq):
+    """Mark which ring samples belong to a FINGER-WIDTH arc (Step 5 debug).
+
+    Mirrors pipeline._count_ring_arcs' keep rule so the overlay paints exactly
+    the arcs that were counted as fingers. Returns a bool array aligned with
+    `seq`: True where the sample sits on a kept arc, False on a rejected
+    (too-wide fist/palm or too-narrow noise) arc or on background.
+    """
+    n = len(seq)
+    min_len = pipeline.FINGER_ARC_MIN_DEG / 360.0 * n
+    max_len = pipeline.FINGER_ARC_MAX_DEG / 360.0 * n
+    keep = np.zeros(n, dtype=bool)
+    if not seq.any() or seq.all():
+        return keep
+    # Rotate to start on a background sample (same trick as the pipeline) so no
+    # run of 1s wraps the seam; then scan runs left to right.
+    shift = int(np.flatnonzero(seq == 0)[0])
+    rolled = np.roll(seq, -shift)
+    j = 0
+    while j < n:
+        if rolled[j]:
+            k = j
+            while k < n and rolled[k]:
+                k += 1
+            if min_len <= (k - j) <= max_len:
+                keep[(np.arange(j, k) + shift) % n] = True   # back to orig index
+            j = k
+        else:
+            j += 1
+    return keep
+
+
 def show(*pairs):
     """Display several (title, image) pairs side by side in one window.
 
@@ -104,11 +136,15 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 3 (re-verify after the fist-vs-forearm fix): the palm center must
-    # land on the palm/fist center for ALL of rock / scissors / paper, and must
-    # NOT slide down onto the wrist. The three gesture photos share one capture
-    # setup (data/*_s5.png; "stone" == rock).
+    # Step 5: verify count_fingers on rock / scissors / paper. For each hand we
+    # draw every concentric ring in its own color and paint the sample points
+    # that fell INSIDE the hand, so each extended finger shows up as a colored
+    # arc. Console prints the per-ring segment counts and the final mode.
     TESTS = ["data/stone_s5.png", "data/scissors_s5.png", "data/paper_s5.png"]
+    # One distinct BGR color per ring (RING_RADIUS_COEFFS order): red, orange, yellow,
+    # green, blue, magenta -- extend if RING_RADIUS_COEFFS grows.
+    RING_COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 255),
+                   (0, 255, 0), (255, 0, 0), (255, 0, 255)]
 
     panels = []
     for path in TESTS:
@@ -116,35 +152,47 @@ if __name__ == "__main__":
         if img is None:
             raise FileNotFoundError("could not read " + path)
 
-        clean = pipeline.skin_mask(img)          # Step 1 mask
-        hands = pipeline.split_hands(clean)      # Step 2: one mask per hand
+        hands = pipeline.split_hands(pipeline.skin_mask(img))   # Steps 1-2
         if not hands:
             raise RuntimeError("no hand found in " + path)
-        # If several blobs survive, judge the biggest (the actual hand).
         hand = max(hands, key=lambda m: np.count_nonzero(m))
-        (cx, cy), r = pipeline.palm_center(hand)  # Step 3 (band-constrained)
+        (cx, cy), r = pipeline.palm_center(hand)                # Step 3
+        cropped = pipeline.crop_forearm(hand, (cx, cy), r)      # Step 4
 
-        # Recompute the search band the SAME way palm_center does, so we can
-        # draw the cyan band-bottom line and see what constrained the search.
-        ys, xs = np.where(hand > 0)
-        top_y = int(ys.min())
-        hand_w = int(xs.max() - xs.min() + 1)
-        band_bottom = top_y + int(pipeline.TOP_SEARCH_SCALE * hand_w)
+        # Step 5: pull the per-ring 0/1 sequences from the shared core so we
+        # visualize EXACTLY what count_fingers sampled, plus the final answer.
+        counts, seqs = pipeline._count_fingers_rings(cropped, (cx, cy), r)
+        fingers = pipeline.count_fingers(cropped, (cx, cy), r)
 
-        # Annotate the ORIGINAL photo so we can judge by eye whether the red
-        # center dot sits on the palm/fist and not on the forearm.
+        # Draw the rings + inside-hand samples on the original photo.
         vis = img.copy()
-        cv2.line(vis, (0, top_y), (vis.shape[1], top_y), (0, 255, 255), 4)      # top_y (yellow)
-        cv2.line(vis, (0, band_bottom), (vis.shape[1], band_bottom),
-                 (255, 255, 0), 4)                                              # band bottom (cyan)
-        cv2.circle(vis, (cx, cy), int(r), (0, 255, 0), 5)   # inscribed circle
-        cv2.circle(vis, (cx, cy), 18, (0, 0, 255), -1)      # palm center dot
+        angles = np.linspace(0.0, 2.0 * np.pi, pipeline.RING_NUM_SAMPLES,
+                             endpoint=False)
+        for i, scale in enumerate(pipeline.RING_RADIUS_COEFFS):
+            color = RING_COLORS[i % len(RING_COLORS)]
+            ring_r = scale * r
+            cv2.circle(vis, (cx, cy), int(ring_r), color, 3)   # the ring itself
+            xs = np.round(cx + ring_r * np.cos(angles)).astype(int)
+            ys = np.round(cy + ring_r * np.sin(angles)).astype(int)
+            # Big colored dot = sample on a KEPT finger-width arc (what got
+            # counted); small gray dot = inside-hand sample on a REJECTED arc
+            # (fist/palm bulk too wide, or noise too narrow).
+            kept = _kept_arc_samples(seqs[i])
+            for k in np.flatnonzero(seqs[i]):
+                if kept[k]:
+                    cv2.circle(vis, (int(xs[k]), int(ys[k])), 9, color, -1)
+                else:
+                    cv2.circle(vis, (int(xs[k]), int(ys[k])), 4, (128, 128, 128), -1)
+        cv2.circle(vis, (cx, cy), 16, (255, 255, 255), -1)     # palm center
 
         name = path.split("/")[-1]
-        print("%-16s center=(%d,%d) r=%.0f  band=[%d,%d]"
-              % (name, cx, cy, r, top_y, band_bottom))
-        panels.append(("%s  c=(%d,%d) r=%.0f" % (name, cx, cy, r), vis))
+        print("%-16s per-ring=%s  -> fingers=%d" % (name, counts, fingers))
+        title = "%s rings=%s fingers=%d" % (name, counts, fingers)
+        cv2.putText(vis, title, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5,
+                    (0, 255, 0), 4, cv2.LINE_AA)
+        panels.append((name, vis))
 
-    # Yellow = top_y, Cyan = band bottom (search limit), Green = inscribed
-    # circle, Red = palm center.
+    # Each ring is one color. Big colored dots = samples on kept finger arcs
+    # (counted); small gray dots = inside-hand samples on rejected arcs. Title
+    # text shows per-ring counts and the final mode.
     show(*panels)
