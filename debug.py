@@ -20,9 +20,9 @@ PANEL_HEIGHT = 480
 MAX_WINDOW_W = 1600
 MAX_WINDOW_H = 850
 
-# How many panels per row. Wide images squished into one long row become
-# unreadable, so we wrap them into a grid instead.
-PANELS_PER_ROW = 2
+# How many panels per row. 1 = stack all panels vertically (top to bottom);
+# larger values wrap the panels into a grid.
+PANELS_PER_ROW = 1
 
 # Style for the title text drawn on top of each panel.
 TITLE_FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -129,8 +129,5 @@ if __name__ == "__main__":
         cv2.putText(overlay, label, org,
                     cv2.FONT_HERSHEY_SIMPLEX, 3.0, (0, 0, 0), 8, cv2.LINE_AA)
 
-    # First hand's raw black/white mask (empty if none found), shown next to
-    # the Step 1 clean mask so we can compare fingertips.
-    hand0 = hands[0] if hands else np.zeros_like(clean)
-    show(("original", img), ("hands overlay", overlay),
-         ("hand 0 mask", hand0), ("clean mask", clean))
+    # Show, top to bottom: original, the Step 1 clean mask, the hand overlay.
+    show(("original", img), ("clean mask", clean), ("hands overlay", overlay))
