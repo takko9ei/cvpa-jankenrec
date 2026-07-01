@@ -65,7 +65,16 @@ HAND_AREA_MAX = 1300000   # ignore blobs larger than this (background bleed)
 # 0.7 is a fairly tight window on the test images: RAISE it and a fist's center
 # can drop onto the wrist; LOWER it and an open hand's center rides up toward the
 # finger bases. Retune if hands sit very differently in the frame.
-TOP_SEARCH_SCALE = 0.7
+TOP_SEARCH_SCALE = 0.78
+
+# Palm center = the CENTROID of the deepest region (every in-band pixel whose
+# distance transform is >= this fraction of the in-band maximum), NOT the single
+# brightest pixel. Averaging the high-value plateau makes the center robust to a
+# sharp secondary distance-transform spike at a finger base, which otherwise
+# yanks the argmax onto a knuckle (the scissors mis-localization). Lower = wider
+# plateau (steadier but can drift toward a neighbouring blob); higher = tighter
+# (closer to the raw argmax).
+CENTROID_FRAC = 0.7
 
 # --- Forearm cropping -----------------------------------------------------
 # Frontal hand assumption: fingers point up, wrist/forearm points down. Any
@@ -250,16 +259,18 @@ def palm_center(hand_mask):
     #    image edge just leaves the whole hand in play (empty slice, no-op).
     dist[band_bottom:, :] = 0
 
-    # 4. Within the band, the pixel with the LARGEST distance-to-edge is the
-    #    point sitting deepest inside the palm/fist -> the palm center.
-    #    minMaxLoc returns the min value, max value, and their (x, y)
-    #    locations; we want the max.
-    _, max_val, _, max_loc = cv2.minMaxLoc(dist)
+    # 4. Palm center = CENTROID of the deepest region, not the single argmax
+    #    pixel. Take the in-band maximum distance, then average the (x, y) of
+    #    every pixel whose distance is >= CENTROID_FRAC of it. That plateau is
+    #    dominated by the broad palm blob, so a sharp secondary spike at a
+    #    finger base can't hijack the center the way the raw argmax could.
+    max_val = float(dist.max())
+    ys_hi, xs_hi = np.where(dist >= CENTROID_FRAC * max_val)
+    center_xy = (int(xs_hi.mean()), int(ys_hi.mean()))
 
-    # 5. That max distance IS the radius of the biggest circle that fits fully
-    #    inside the hand at that point (the palm's inscribed circle).
-    center_xy = (int(max_loc[0]), int(max_loc[1]))
-    radius = float(max_val)
+    # 5. Radius = that in-band maximum distance = the palm's inscribed-circle
+    #    radius (the biggest circle that fits inside the hand at the palm).
+    radius = max_val
     return center_xy, radius
 
 
