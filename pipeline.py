@@ -110,6 +110,20 @@ ROCK_MAX_FINGERS = 1        # <= this many fingers => Rock
 SCISSORS_MAX_FINGERS = 3    # <= this many fingers (and > ROCK_MAX) => Scissors
                             # anything greater => Paper
 
+# --- Result overlay style (draw) ------------------------------------------
+# Text size / stroke for the gesture+result label draw() writes near each palm.
+# RESOLUTION-DEPENDENT (like the area filter): these are sized for the high-res
+# data/ photos (~2500 px wide); for a ~640 px live webcam frame divide both by
+# roughly 3-4. Result -> BGR color: Win green, Lose red, Draw/Pending gray.
+DRAW_FONT_SCALE = 2.0
+DRAW_THICKNESS = 4
+RESULT_COLORS = {
+    "Win":     (0, 255, 0),      # green
+    "Lose":    (0, 0, 255),      # red
+    "Draw":    (150, 150, 150),  # gray
+    "Pending": (150, 150, 150),  # gray (single hand, no opponent yet)
+}
+
 
 # =============================================================================
 # PIPELINE FUNCTIONS — 8 个阶段（当前仅骨架）
@@ -428,10 +442,32 @@ def judge(shapes):
         shapes: list of gesture-name strings (typically 2 hands).
 
     Returns:
-        list[result]: per-hand outcome (e.g. "Win" / "Lose" / "Draw"),
+        list[result]: per-hand outcome ("Win" / "Lose" / "Draw" / "Pending"),
         aligned with the input order.
     """
-    raise NotImplementedError
+    # "X beats Y": the classic cycle Rock > Scissors > Paper > Rock. A plain
+    # dict keeps the rule readable — no clever arithmetic.
+    beats = {"Rock": "Scissors", "Scissors": "Paper", "Paper": "Rock"}
+
+    # A single hand has no opponent, so its result is undecided. We return
+    # "Pending" (rather than "Draw") to make that state explicit for the live
+    # loop / overlay.
+    if len(shapes) == 1:
+        return ["Pending"]
+
+    # How many DISTINCT gestures are on the table decides everything.
+    kinds = set(shapes)
+
+    # All hands identical (1 kind) OR all three gestures present at once -> no
+    # single winner, everyone draws. (Why 3-kinds is a draw: see the writeup.)
+    if len(kinds) == 1 or len(kinds) == 3:
+        return ["Draw"] * len(shapes)
+
+    # Exactly 2 distinct gestures: one of them beats the other. Pick the winning
+    # gesture, then label every hand by whether it holds it.
+    a, b = kinds
+    winner = a if beats[a] == b else b
+    return ["Win" if s == winner else "Lose" for s in shapes]
 
 
 def draw(frame, records):
@@ -442,10 +478,33 @@ def draw(frame, records):
 
     Args:
         frame: original BGR frame (H, W, 3) uint8.
-        records: per-hand info collected through the pipeline (centers,
-            gestures, results, ...).
+        records: list of per-hand dicts, each with keys "center" ((x, y) palm
+            center), "gesture" (str), "result" (str from judge()), and optional
+            "radius" (float, palm circle to draw / place the label above).
 
     Returns:
         frame: BGR image (H, W, 3) uint8 with annotations drawn on.
     """
-    raise NotImplementedError
+    out = frame.copy()
+    for rec in records:
+        cx, cy = rec["center"]
+        gesture, result = rec["gesture"], rec["result"]
+        # One color carries the outcome everywhere: circle + text share it.
+        color = RESULT_COLORS.get(result, (150, 150, 150))
+        radius = int(rec.get("radius", 0))
+
+        # Optional palm circle in the result color, so each hand is easy to spot.
+        if radius > 0:
+            cv2.circle(out, (cx, cy), radius, color, DRAW_THICKNESS)
+
+        # Label: "<gesture>: <result>", centered horizontally on the palm and
+        # placed just above the circle. getTextSize lets us center it; clamp the
+        # y so the text never runs off the top of the frame.
+        label = "%s: %s" % (gesture, result)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX,
+                                      DRAW_FONT_SCALE, DRAW_THICKNESS)
+        tx = cx - tw // 2
+        ty = max(th + 5, cy - radius - 15)
+        cv2.putText(out, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                    DRAW_FONT_SCALE, color, DRAW_THICKNESS, cv2.LINE_AA)
+    return out

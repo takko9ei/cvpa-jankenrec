@@ -33,6 +33,11 @@ TITLE_THICK = 2
 # Distinct pure BGR colors used to paint each detected hand in the overlay.
 HAND_COLORS = [(0, 0, 255), (0, 255, 0), (255, 0, 0), (0, 255, 255)]  # R,G,B,Y
 
+# One distinct BGR color per finger-counting ring (RING_RADIUS_COEFFS order):
+# red, orange, yellow, green, blue, magenta -- extend if more rings are added.
+RING_COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 255),
+               (0, 255, 0), (255, 0, 0), (255, 0, 255)]
+
 
 def _to_bgr(img):
     """Normalize any panel image to a 3-channel BGR uint8 image.
@@ -88,6 +93,32 @@ def _kept_arc_samples(seq):
     return keep
 
 
+def _overlay_rings(vis, center, radius, seqs):
+    """Draw one hand's finger-counting rings + arc samples onto `vis` (debug).
+
+    These are the "decision rings" that count_fingers used: each ring in its own
+    color, a big colored dot on every sample that sat on a KEPT finger-width arc
+    (what got counted), a small gray dot on every inside-hand sample that fell on
+    a REJECTED arc (fist/palm bulk too wide, or noise too narrow). Overlaying
+    them on the two-hand result lets us see WHY each hand got its finger count.
+    """
+    cx, cy = center
+    angles = np.linspace(0.0, 2.0 * np.pi, pipeline.RING_NUM_SAMPLES,
+                         endpoint=False)
+    for i, scale in enumerate(pipeline.RING_RADIUS_COEFFS):
+        color = RING_COLORS[i % len(RING_COLORS)]
+        ring_r = scale * radius
+        cv2.circle(vis, (cx, cy), int(ring_r), color, 3)       # the ring itself
+        xs = np.round(cx + ring_r * np.cos(angles)).astype(int)
+        ys = np.round(cy + ring_r * np.sin(angles)).astype(int)
+        kept = _kept_arc_samples(seqs[i])
+        for k in np.flatnonzero(seqs[i]):
+            if kept[k]:
+                cv2.circle(vis, (int(xs[k]), int(ys[k])), 9, color, -1)
+            else:
+                cv2.circle(vis, (int(xs[k]), int(ys[k])), 4, (128, 128, 128), -1)
+
+
 def show(*pairs):
     """Display several (title, image) pairs side by side in one window.
 
@@ -136,16 +167,13 @@ def show(*pairs):
 
 
 if __name__ == "__main__":
-    # Step 6: run the whole single-hand subchain end to end on rock / scissors /
-    # paper — skin_mask -> split_hands -> palm_center -> crop_forearm ->
-    # count_fingers -> classify — and print each hand's finger count and final
-    # gesture name. The concentric rings are still drawn (colored dots = kept
-    # finger arcs, gray = rejected) so the count stays inspectable.
-    TESTS = ["data/stone_s5.png", "data/scissors_s5.png", "data/paper_s5.png"]
-    # One distinct BGR color per ring (RING_RADIUS_COEFFS order): red, orange, yellow,
-    # green, blue, magenta -- extend if RING_RADIUS_COEFFS grows.
-    RING_COLORS = [(0, 0, 255), (0, 165, 255), (0, 255, 255),
-                   (0, 255, 0), (255, 0, 0), (255, 0, 255)]
+    # Step 7: run the FULL pipeline on two-hand match photos. Every hand goes
+    # through skin_mask -> split_hands -> palm_center -> crop_forearm ->
+    # count_fingers -> classify; judge() then scores the gestures against each
+    # other and draw() paints the outcome (Win green / Lose red / Draw|Pending
+    # gray) back onto the frame.
+    TESTS = ["data/rock_paper.png", "data/rock_scissors.png",
+             "data/scissors_paper.png"]
 
     panels = []
     for path in TESTS:
@@ -156,46 +184,38 @@ if __name__ == "__main__":
         hands = pipeline.split_hands(pipeline.skin_mask(img))   # Steps 1-2
         if not hands:
             raise RuntimeError("no hand found in " + path)
-        hand = max(hands, key=lambda m: np.count_nonzero(m))
-        (cx, cy), r = pipeline.palm_center(hand)                # Step 3
-        cropped = pipeline.crop_forearm(hand, (cx, cy), r)      # Step 4
 
-        # Step 5: pull the per-ring 0/1 sequences from the shared core so we
-        # visualize EXACTLY what count_fingers sampled, plus the final answer.
-        counts, seqs = pipeline._count_fingers_rings(cropped, (cx, cy), r)
-        fingers = pipeline.count_fingers(cropped, (cx, cy), r)
-        gesture = pipeline.classify(fingers)                    # Step 6
+        # Steps 3-6 per hand: build one record (center, radius, gesture) each,
+        # and stash the ring sequences so we can overlay the decision rings.
+        records = []
+        ring_data = []            # (center, radius, seqs) per hand, for debug
+        for hand in hands:
+            (cx, cy), r = pipeline.palm_center(hand)            # Step 3
+            cropped = pipeline.crop_forearm(hand, (cx, cy), r)  # Step 4
+            _, seqs = pipeline._count_fingers_rings(cropped, (cx, cy), r)
+            fingers = pipeline.count_fingers(cropped, (cx, cy), r)  # Step 5
+            gesture = pipeline.classify(fingers)               # Step 6
+            records.append({"center": (cx, cy), "radius": r,
+                            "fingers": fingers, "gesture": gesture})
+            ring_data.append(((cx, cy), r, seqs))
 
-        # Draw the rings + inside-hand samples on the original photo.
+        # Step 7: judge all hands together, attach each result to its hand.
+        results = pipeline.judge([rec["gesture"] for rec in records])
+        for rec, res in zip(records, results):
+            rec["result"] = res
+
+        # Debug view: draw the finger-counting rings FIRST, then let draw() paint
+        # the result circle + label on top so the labels stay readable.
         vis = img.copy()
-        angles = np.linspace(0.0, 2.0 * np.pi, pipeline.RING_NUM_SAMPLES,
-                             endpoint=False)
-        for i, scale in enumerate(pipeline.RING_RADIUS_COEFFS):
-            color = RING_COLORS[i % len(RING_COLORS)]
-            ring_r = scale * r
-            cv2.circle(vis, (cx, cy), int(ring_r), color, 3)   # the ring itself
-            xs = np.round(cx + ring_r * np.cos(angles)).astype(int)
-            ys = np.round(cy + ring_r * np.sin(angles)).astype(int)
-            # Big colored dot = sample on a KEPT finger-width arc (what got
-            # counted); small gray dot = inside-hand sample on a REJECTED arc
-            # (fist/palm bulk too wide, or noise too narrow).
-            kept = _kept_arc_samples(seqs[i])
-            for k in np.flatnonzero(seqs[i]):
-                if kept[k]:
-                    cv2.circle(vis, (int(xs[k]), int(ys[k])), 9, color, -1)
-                else:
-                    cv2.circle(vis, (int(xs[k]), int(ys[k])), 4, (128, 128, 128), -1)
-        cv2.circle(vis, (cx, cy), 16, (255, 255, 255), -1)     # palm center
+        for center, radius, seqs in ring_data:
+            _overlay_rings(vis, center, radius, seqs)
+        vis = pipeline.draw(vis, records)                      # Step 8
 
         name = path.split("/")[-1]
-        print("%-16s per-ring=%s  -> fingers=%d  -> %s"
-              % (name, counts, fingers, gesture))
-        title = "%s  fingers=%d  %s" % (name, fingers, gesture)
-        cv2.putText(vis, title, (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.5,
-                    (0, 255, 0), 4, cv2.LINE_AA)
+        summary = " | ".join("%s(%df)->%s" % (rec["gesture"], rec["fingers"],
+                                              rec["result"]) for rec in records)
+        print("%-20s %s" % (name, summary))
         panels.append((name, vis))
 
-    # Each ring is one color. Big colored dots = samples on kept finger arcs
-    # (counted); small gray dots = inside-hand samples on rejected arcs. Title
-    # text shows per-ring counts and the final mode.
+    # Each hand is labelled with "<gesture>: <result>"; color = outcome.
     show(*panels)
