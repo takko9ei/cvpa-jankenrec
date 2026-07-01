@@ -56,7 +56,7 @@ HAND_AREA_MAX = 1300000   # ignore blobs larger than this (background bleed)
 # hand pixel more than this many palm-radii BELOW the palm center is treated
 # as forearm and blacked out. Larger = keep more (safer for the palm heel),
 # smaller = cut more aggressively (risk clipping the palm).
-CUT_BELOW_SCALE = 1.5
+CUT_BELOW_SCALE = 1.2
 
 # --- Finger counting: concentric ring sampling ----------------------------
 # We sample circles at these multiples of the palm inscribed-circle radius.
