@@ -29,7 +29,7 @@ import numpy as np
 # the wall, so we raise CR_MIN and lower CB_MAX to reject it. On a background
 # that clear
 # ly differs from skin, these can be loosened back toward defaults.
-CR_MIN = 135      # lower bound of Cr channel (raise -> stricter/redder)
+CR_MIN = 138      # lower bound of Cr channel (raise -> stricter/redder)
 CR_MAX = 173          # upper bound of Cr channel (lower -> stricter)
 CB_MIN = 77      # lower bound of Cb channel (raise -> stricter)
 CB_MAX = 130          # upper bound of Cb channel (lower -> stricter/less blue)
@@ -38,7 +38,13 @@ CB_MAX = 130          # upper bound of Cb channel (lower -> stricter/less blue)
 # Close = fill small holes inside the hand; Open = remove small speckle noise.
 # Bigger kernel = stronger effect (fills/removes larger regions) but blurs
 # the silhouette; too big can merge fingers or eat thin finger tips.
-MORPH_CLOSE_KSIZE = 7   # kernel size for morphological closing (odd number)
+MORPH_CLOSE_KSIZE = 45   # kernel size for morphological closing (odd number)
+# NOTE: raised from 7 to close a shadow hole in the fist's palm (~7500px,
+# CR_MIN=138 pushes that dark crease just below the skin threshold). Swept
+# 15/21/31/41/45/51/75/99 on data/rock_paper.png: the hole only fully closes
+# (0px left) at ksize>=45. Checked the paper hand's 4 inter-finger valleys at
+# every step -- none merge even at 99 (areas shrink ~5-15% at the edges, but
+# stay separate), so 45 is safe headroom, not a knife's-edge value.
 MORPH_OPEN_KSIZE = 5    # kernel size for morphological opening (odd number)
 
 # --- Hand region area filter (in pixels) ----------------------------------
