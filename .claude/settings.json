@@ -7,7 +7,8 @@
       "Bash(venv/bin/python -c ' *)",
       "Bash(venv/bin/python -m py_compile test_script_4.py)",
       "Bash(venv/bin/python -m py_compile test_script_5.py)",
-      "Bash(venv/bin/python -m py_compile test_script_6.py)"
+      "Bash(venv/bin/python -m py_compile test_script_6.py)",
+      "Bash(python3 -c ' *)"
     ]
   }
 }
